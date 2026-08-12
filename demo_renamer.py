@@ -14,6 +14,7 @@ DATE_FMT = "%Y_%m_%d_%H_%M_%S"
 
 # Demo file appears ~4 minutes after Playing on this server
 PLAY_DELAY = 245.0
+DEMO_WRITE_DELAY = 240.0
 RETRY_WAIT = 10.0
 RETRIES = 5
 TRACKER_SKEW = 5.0
@@ -56,29 +57,33 @@ def _parse_tracker(name):
     if gpm_index == 0:
         return None
 
-    mapname = "_".join(middle[:gpm_index])
-    gamemode = "gpm"
-    if gpm_index + 1 < len(middle):
-        gamemode = "gpm_" + middle[gpm_index + 1]
+    datetime_text = "_".join(parts[:6])
+    try:
+        epoch = time.mktime(time.strptime(datetime_text, DATE_FMT))
+    except Exception:
+        return None
 
     return {
-        "datetime": "_".join(parts[:6]),
-        "mapname": mapname,
-        "gamemode": gamemode,
+        "datetime": datetime_text,
+        "mapname": "_".join(middle[:gpm_index]),
+        "gamemode": "_".join(middle[gpm_index:]),
         "layer": parts[-1],
+        "epoch": epoch,
+        "filename": name,
     }
 
 
-def _to_epoch(text):
-    try:
-        return time.mktime(time.strptime(str(text), DATE_FMT))
-    except Exception:
-        return None
+def _demo_name_from_tracker(tracker):
+    return "demo_%s_%s_%s_%s.bf2demo" % (
+        tracker["datetime"],
+        _safe(tracker["mapname"], "unknown_map"),
+        _safe(tracker["gamemode"], "gpm_cq"),
+        _safe(tracker["layer"], "64"),
+    )
 
 
 def _find_tracker(started):
     if not os.path.isdir(TEMP_DIR):
-        _log("temp dir missing")
         return None
 
     best = None
@@ -87,7 +92,6 @@ def _find_tracker(started):
     try:
         names = os.listdir(TEMP_DIR)
     except Exception:
-        _log("temp dir unreadable")
         return None
 
     for name in names:
@@ -101,10 +105,12 @@ def _find_tracker(started):
         except Exception:
             continue
 
-        epoch = _to_epoch(info["datetime"])
-        if epoch is not None and abs(epoch - started) > TRACKER_SKEW and mtime < started - TRACKER_SKEW:
+        # Keep tracker of this round: date near Playing, or fresh file
+        if abs(info["epoch"] - started) > TRACKER_SKEW and mtime < started - TRACKER_SKEW:
             continue
 
+        info["path"] = path
+        info["mtime"] = mtime
         if best is None or mtime > best_mtime:
             best = info
             best_mtime = mtime
@@ -112,27 +118,54 @@ def _find_tracker(started):
     return best
 
 
-def _find_demo(started):
+def _parse_demo_epoch(name):
+    """
+    Date from auto demo name, e.g.:
+    auto_2026_08_11_19_04_35.bf2demo
+    """
+    name = os.path.basename(str(name)).strip()
+    lower = name.lower()
+    if not lower.startswith(AUTO_PREFIX) or not lower.endswith(DEMO_SUFFIX):
+        return None
+
+    body = name[len(AUTO_PREFIX):len(name) - len(DEMO_SUFFIX)]
+    parts = body.split("_")
+    if len(parts) < 6 or not all(part.isdigit() for part in parts[:6]):
+        return None
+
     try:
-        files = [
-            os.path.join(DEMO_DIR, name) for name in os.listdir(DEMO_DIR)
-            if name.startswith(AUTO_PREFIX) and name.endswith(DEMO_SUFFIX)
-        ]
+        return time.mktime(time.strptime("_".join(parts[:6]), DATE_FMT))
     except Exception:
         return None
 
-    candidates = []
-    for path in files:
-        try:
-            mtime = os.path.getmtime(path)
-        except Exception:
-            continue
-        if mtime >= started - 10.0:
-            candidates.append(path)
 
-    if not candidates:
+def _find_demo_for_tracker(tracker):
+    """
+    Pick auto_ demo whose filename date matches tracker date + write delay.
+    |date_demo - date_tracker - DEMO_WRITE_DELAY| <= TRACKER_SKEW
+    """
+    best = None
+    best_delta = None
+
+    try:
+        names = os.listdir(DEMO_DIR)
+    except Exception:
         return None
-    return max(candidates, key=os.path.getmtime)
+
+    for name in names:
+        if not (name.startswith(AUTO_PREFIX) and name.endswith(DEMO_SUFFIX)):
+            continue
+        demo_epoch = _parse_demo_epoch(name)
+        if demo_epoch is None:
+            continue
+        delta = abs(demo_epoch - tracker["epoch"] - DEMO_WRITE_DELAY)
+        if delta > TRACKER_SKEW:
+            continue
+        if best is None or delta < best_delta:
+            best = os.path.join(DEMO_DIR, name)
+            best_delta = delta
+
+    return best
 
 
 def _unique_path(path):
@@ -146,13 +179,16 @@ def _unique_path(path):
     return None
 
 
+def _retry(started, attempt):
+    if _rtimer and attempt + 1 < RETRIES and started == _round_started:
+        _rtimer.fireOnce(_rename_step, RETRY_WAIT, (started, attempt + 1))
+
+
 def _schedule_rename():
     global _round_started
     if not _rtimer:
-        _log("rtimer missing")
         return
     _round_started = time.time()
-    _log("trigger Playing")
     _rtimer.fireOnce(_rename_step, PLAY_DELAY, (_round_started, 0))
 
 
@@ -164,23 +200,22 @@ def _rename_step(data=None):
     if started != _round_started:
         return
 
+    # 1) tracker from temp/
     tracker = _find_tracker(started)
-    demo = _find_demo(started)
-    if not tracker or not demo:
-        if not tracker:
-            _log("tracker not found")
-        if not demo:
-            _log("demo not found")
-        if _rtimer and attempt + 1 < RETRIES:
-            _rtimer.fireOnce(_rename_step, RETRY_WAIT, (started, attempt + 1))
+    if not tracker:
+        _retry(started, attempt)
         return
 
-    target_name = "demo_%s_%s_%s_%s.bf2demo" % (
-        tracker["datetime"],
-        _safe(tracker["mapname"], "unknown_map"),
-        _safe(tracker["gamemode"], "gpm_cq"),
-        _safe(tracker["layer"], "64"),
-    )
+    # 2) name from tracker
+    target_name = _demo_name_from_tracker(tracker)
+
+    # 3) auto_*.bf2demo matching this tracker
+    demo = _find_demo_for_tracker(tracker)
+    if not demo:
+        _retry(started, attempt)
+        return
+
+    # 4) rename
     target_path = _unique_path(os.path.join(DEMO_DIR, target_name))
     if not target_path:
         return
@@ -191,9 +226,7 @@ def _rename_step(data=None):
         os.rename(demo, target_path)
         _log("renamed to " + os.path.basename(target_path))
     except Exception:
-        _log("rename retry")
-        if _rtimer and attempt + 1 < RETRIES and started == _round_started:
-            _rtimer.fireOnce(_rename_step, RETRY_WAIT, (started, attempt + 1))
+        _retry(started, attempt)
 
 
 def onGameStatusChanged(status):
