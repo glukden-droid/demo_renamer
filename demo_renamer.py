@@ -9,7 +9,7 @@ import threading
 DEMO_DIR = "mods/pr/demos/"
 TEMP_DIRS = ("temp/", "mods/pr/temp/")
 DATE_SKEW = 5.0
-PLAY_DELAY = 5.0
+PLAY_DELAY = 245.0
 RETRIES = 5
 RETRY_WAIT = 1.0
 
