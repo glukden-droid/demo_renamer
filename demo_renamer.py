@@ -34,8 +34,19 @@ def _safe(value, fallback):
     value = str(value).strip().lower()
     for ch in '/\\:*?"<>|':
         value = value.replace(ch, '')
-    value = '_'.join(value.replace(' ', '_').split('_')).strip('._')
+    value = '_'.join(p for p in value.replace(' ', '_').split('_') if p).strip('._')
     return value or fallback
+
+
+def _parse_stamp(parts):
+    """(text, epoch) from first 6 numeric parts, or None."""
+    if len(parts) < 6 or not all(part.isdigit() for part in parts[:6]):
+        return None
+    text = "_".join(parts[:6])
+    try:
+        return text, time.mktime(time.strptime(text, DATE_FMT))
+    except Exception:
+        return None
 
 
 def _parse_tracker(name):
@@ -46,7 +57,7 @@ def _parse_tracker(name):
 
     body = name[len(TRACKER_PREFIX):len(name) - len(TRACKER_SUFFIX)]
     parts = body.split("_")
-    if len(parts) < 10 or not all(part.isdigit() for part in parts[:6]) or not parts[-1].isdigit():
+    if len(parts) < 10 or not parts[-1].isdigit():
         return None
 
     middle = parts[6:-1]
@@ -57,11 +68,10 @@ def _parse_tracker(name):
     if gpm_index == 0:
         return None
 
-    datetime_text = "_".join(parts[:6])
-    try:
-        epoch = time.mktime(time.strptime(datetime_text, DATE_FMT))
-    except Exception:
+    stamp = _parse_stamp(parts)
+    if not stamp:
         return None
+    datetime_text, epoch = stamp
 
     return {
         "datetime": datetime_text,
@@ -83,11 +93,7 @@ def _demo_name_from_tracker(tracker):
 
 
 def _find_tracker(started):
-    if not os.path.isdir(TEMP_DIR):
-        return None
-
     best = None
-    best_mtime = 0.0
 
     try:
         names = os.listdir(TEMP_DIR)
@@ -111,9 +117,8 @@ def _find_tracker(started):
 
         info["path"] = path
         info["mtime"] = mtime
-        if best is None or mtime > best_mtime:
+        if best is None or mtime > best["mtime"]:
             best = info
-            best_mtime = mtime
 
     return best
 
@@ -129,14 +134,8 @@ def _parse_demo_epoch(name):
         return None
 
     body = name[len(AUTO_PREFIX):len(name) - len(DEMO_SUFFIX)]
-    parts = body.split("_")
-    if len(parts) < 6 or not all(part.isdigit() for part in parts[:6]):
-        return None
-
-    try:
-        return time.mktime(time.strptime("_".join(parts[:6]), DATE_FMT))
-    except Exception:
-        return None
+    stamp = _parse_stamp(body.split("_"))
+    return stamp[1] if stamp else None
 
 
 def _find_demo_for_tracker(tracker):
@@ -153,8 +152,6 @@ def _find_demo_for_tracker(tracker):
         return None
 
     for name in names:
-        if not (name.startswith(AUTO_PREFIX) and name.endswith(DEMO_SUFFIX)):
-            continue
         demo_epoch = _parse_demo_epoch(name)
         if demo_epoch is None:
             continue
@@ -180,8 +177,12 @@ def _unique_path(path):
 
 
 def _retry(started, attempt):
-    if _rtimer and attempt + 1 < RETRIES and started == _round_started:
+    if started != _round_started:
+        return
+    if _rtimer and attempt + 1 < RETRIES:
         _rtimer.fireOnce(_rename_step, RETRY_WAIT, (started, attempt + 1))
+    else:
+        _log("gave up after %d attempts" % (attempt + 1))
 
 
 def _schedule_rename():
@@ -206,26 +207,25 @@ def _rename_step(data=None):
         _retry(started, attempt)
         return
 
-    # 2) name from tracker
-    target_name = _demo_name_from_tracker(tracker)
-
-    # 3) auto_*.bf2demo matching this tracker
+    # 2) auto_*.bf2demo matching this tracker
     demo = _find_demo_for_tracker(tracker)
     if not demo:
         _retry(started, attempt)
         return
 
-    # 4) rename
+    # 3) name from tracker
+    target_name = _demo_name_from_tracker(tracker)
     target_path = _unique_path(os.path.join(DEMO_DIR, target_name))
     if not target_path:
+        _log("no free name for " + target_name)
         return
 
+    # 4) rename
     try:
-        with open(demo, 'r+'):
-            pass
         os.rename(demo, target_path)
         _log("renamed to " + os.path.basename(target_path))
-    except Exception:
+    except Exception as e:
+        _log("rename failed: " + str(e))
         _retry(started, attempt)
 
 
