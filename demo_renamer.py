@@ -56,35 +56,47 @@ def _newest_demo():
 
 
 def _rename_step(data):
-    started, attempt = data
-    if started != _round_started:
-        return
     try:
-        demo = _newest_demo()
-        target = os.path.join(DEMO_DIR, "demo_%s.bf2demo" % _read_info(demo))
-        os.rename(demo, target)
-        _log("renamed to " + os.path.basename(target))
+        started, attempt = data
+        if started != _round_started:
+            return
+        try:
+            demo = _newest_demo()
+            target = os.path.join(DEMO_DIR, "demo_%s.bf2demo" % _read_info(demo))
+            os.rename(demo, target)
+            _log("renamed to " + os.path.basename(target))
+        except Exception as e:
+            if attempt + 1 < RETRIES:
+                _rtimer.fireOnce(_rename_step, RETRY_WAIT, (started, attempt + 1))
+            else:
+                _log("failed: " + str(e))
     except Exception as e:
-        if attempt + 1 < RETRIES:
-            _rtimer.fireOnce(_rename_step, RETRY_WAIT, (started, attempt + 1))
-        else:
-            _log("failed: " + str(e))
+        _log("error: " + str(e))
 
 
 def onGameStatusChanged(status):
     global _round_started
-    if status == bf2.GameStatus.Playing:
-        _round_started = time.time()
-        _rtimer.fireOnce(_rename_step, PLAY_DELAY, (_round_started, 0))
+    try:
+        if status == bf2.GameStatus.Playing:
+            _round_started = time.time()
+            _rtimer.fireOnce(_rename_step, PLAY_DELAY, (_round_started, 0))
+    except Exception as e:
+        _log("error: " + str(e))
 
 
 def init():
     global _rtimer
-    import game.realitytimer as rtimer
-    _rtimer = rtimer
-    host.registerGameStatusHandler(onGameStatusChanged)
-    _log("initialized")
+    try:
+        import game.realitytimer as rtimer
+        _rtimer = rtimer
+        host.registerGameStatusHandler(onGameStatusChanged)
+        _log("initialized")
+    except Exception as e:
+        _log("init failed: " + str(e))
 
 
 def deinit():
-    host.unregisterGameStatusHandler(onGameStatusChanged)
+    try:
+        host.unregisterGameStatusHandler(onGameStatusChanged)
+    except Exception as e:
+        _log("deinit failed: " + str(e))
