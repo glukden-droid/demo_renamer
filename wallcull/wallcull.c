@@ -26,6 +26,8 @@
 #define ADDR_OBJECT_MANAGER  0x112ee48UL /* world::objectManager */
 #define ADDR_IID_ISOLDIER    0xc7ce20UL /* world::IID_ISoldier */
 #define ADDR_PRED_VTABLE     0xb339b0UL /* ProjectileVsTargetPredicator vtable+0x10 */
+#define ADDR_IID_IPCO        0xc7ce6cUL /* world::IID_IPlayerControlObject */
+#define ADDR_IID_IWEAPON     0xc7cea0UL /* world::IID_IWeaponObject */
 #define PROLOGUE_LEN 18
 
 static const unsigned char EXPECTED_PROLOGUE[PROLOGUE_LEN] = {
@@ -44,6 +46,10 @@ static const unsigned char EXPECTED_PROLOGUE[PROLOGUE_LEN] = {
 #define VT_INTERSECT_LINE  0xd0   /* ObjectManager::intersectLine(...) */
 #define VT_PHYS_VELOCITY   0xc0   /* physics node at object+0x88 */
 #define OBJ_PHYSICS        0x88
+#define VT_PCO_WEAPON      0xe0   /* IPlayerControlObject: weapon in slot i */
+#define VT_WEAPON_FIRING   0x38   /* IWeaponObject::isFiring() */
+#define VT_WEAPON_NOISY    0x228  /* IWeaponObject::getNoisy(), 0 = suppressed */
+#define WEAPON_SLOTS       3      /* as in Player::updateGhostFiringState */
 
 typedef float (*calc_fn)(void *self, void *desc, float a, void *player,
                          float *mat, const float *vec, float b, float c, int d);
@@ -52,6 +58,7 @@ typedef void *(*qi_fn)(void *obj, unsigned int iid);
 typedef float *(*vec_fn)(void *obj);
 typedef int (*int_fn)(void *obj);
 typedef void *(*ptr_fn)(void *obj);
+typedef void *(*slot_fn)(void *obj, int slot);
 typedef char (*line_fn)(void *om, void **hit, float *pos, float *normal, int *mat,
                         const float *from, const float *delta, void *pred,
                         int b1, int b2, int b3, int b4, unsigned int mask);
@@ -73,9 +80,12 @@ static float recheck = 0.2f;         /* seconds between checks per pair */
 static float lead_time = 0.25f;      /* predict target movement (ping + re-ghost) */
 static long ray_budget = 40000;      /* rays per second; over budget = visible */
 static int log_interval = 60;
+static float shot_range = 150.0f;    /* send a firing enemy within this radius */
+static float quiet_range = 40.0f;    /* same, for suppressed weapons */
+static float shot_hold = 1.5f;       /* keep sending after the last shot */
 
 static calc_fn orig_calc;
-static long rays_this_sec, rays_total, culled_total, checks_total, over_budget;
+static long rays_this_sec, rays_total, culled_total, checks_total, over_budget, shot_total;
 static double sec_start, last_log;
 
 static double now_sec(void)
@@ -111,6 +121,69 @@ static struct entry *lookup(void *viewer, void *target, double now)
         }
     }
     return NULL;
+}
+
+/* --- last shot per soldier --- */
+#define SHOT_SIZE 1024
+struct shot {
+    void *soldier;
+    double checked;
+    double last_shot;
+    int noisy;
+};
+static struct shot shots[SHOT_SIZE];
+
+/* Weapon lookup mirrors Player::updateGhostFiringState. */
+static void sample_firing(void *root, struct shot *s)
+{
+    void *pco = VCALL(root, VT_QUERY_INTERFACE, qi_fn)(root, *(unsigned int *)ADDR_IID_IPCO);
+    if (!pco)
+        return;
+    unsigned int iid = *(unsigned int *)ADDR_IID_IWEAPON;
+    for (int i = 0; i < WEAPON_SLOTS; i++) {
+        void *w = VCALL(pco, VT_PCO_WEAPON, slot_fn)(pco, i);
+        if (!w || (*((unsigned char *)w + 8) & 1))
+            continue;
+        void *iw = VCALL(w, VT_QUERY_INTERFACE, qi_fn)(w, iid);
+        if (!iw || !(VCALL(iw, VT_WEAPON_FIRING, int_fn)(iw) & 0xff))
+            continue;
+        s->last_shot = s->checked;
+        s->noisy = VCALL(iw, VT_WEAPON_NOISY, int_fn)(iw) & 0xff;
+        shot_total++;
+        return;
+    }
+}
+
+/* Heard by the viewer: fired within shot_hold and inside hearing range. */
+static int heard_shot(void *root, float dist2, double now)
+{
+    uintptr_t h = ((uintptr_t)root >> 4) * 2654435761u;
+    struct shot *s = NULL;
+    for (int i = 0; i < 4; i++) {
+        struct shot *c = &shots[(h + i) & (SHOT_SIZE - 1)];
+        if (c->soldier == root) {
+            s = c;
+            break;
+        }
+        if (!s && (!c->soldier || c->checked + 10.0 < now))
+            s = c;
+    }
+    if (!s)
+        return 0;
+    if (s->soldier != root) {
+        s->soldier = root;
+        s->last_shot = -1e9;
+        s->noisy = 0;
+        s->checked = 0;
+    }
+    if (now - s->checked >= 0.01) {     /* once per server frame */
+        s->checked = now;
+        sample_firing(root, s);
+    }
+    if (now - s->last_shot > shot_hold)
+        return 0;
+    float range = s->noisy ? shot_range : quiet_range;
+    return dist2 <= range * range;
 }
 
 static int ray_clear(void *om, const float *from, const float *to,
@@ -187,8 +260,8 @@ static float hooked_calc(void *self, void *desc, float a, void *player,
     }
     if (log_interval > 0 && now - last_log >= log_interval) {
         last_log = now;
-        fprintf(stderr, "wallcull: checks=%ld rays=%ld culled=%ld over_budget=%ld\n",
-                checks_total, rays_total, culled_total, over_budget);
+        fprintf(stderr, "wallcull: checks=%ld rays=%ld culled=%ld over_budget=%ld shots=%ld\n",
+                checks_total, rays_total, culled_total, over_budget, shot_total);
     }
 
     /* desc->0x10->[0]->[0]->0x28->0x10, same path as the original */
@@ -216,8 +289,11 @@ static float hooked_calc(void *self, void *desc, float a, void *player,
     if (!tpos)
         return prio;
     float dx = tpos[0] - mat[12], dy = tpos[1] - mat[13], dz = tpos[2] - mat[14];
-    if (dx * dx + dy * dy + dz * dz <= near_dist * near_dist)
+    float dist2 = dx * dx + dy * dy + dz * dz;
+    if (dist2 <= near_dist * near_dist)
         return prio;
+    if (heard_shot(root, dist2, now))
+        return prio;    /* audible gunfire: send so the client can play it */
 
     struct entry *e = lookup(player, root, now);
     if (!e)
@@ -292,6 +368,9 @@ __attribute__((constructor)) static void wallcull_init(void)
     lead_time = env_float("WALLCULL_LEAD", lead_time);
     ray_budget = (long)env_float("WALLCULL_RAY_BUDGET", (float)ray_budget);
     log_interval = (int)env_float("WALLCULL_LOG", (float)log_interval);
+    shot_range = env_float("WALLCULL_SHOT_RANGE", shot_range);
+    quiet_range = env_float("WALLCULL_QUIET_RANGE", quiet_range);
+    shot_hold = env_float("WALLCULL_SHOT_HOLD", shot_hold);
 
     unsigned char *target = (unsigned char *)ADDR_CALC_PRIORITY;
     if (memcmp(target, EXPECTED_PROLOGUE, PROLOGUE_LEN)) {
@@ -303,6 +382,7 @@ __attribute__((constructor)) static void wallcull_init(void)
         fprintf(stderr, "wallcull: patch failed, hook not installed\n");
         return;
     }
-    fprintf(stderr, "wallcull: active near=%.0f hold=%.2f recheck=%.2f lead=%.2f budget=%ld\n",
-            near_dist, hold_time, recheck, lead_time, ray_budget);
+    fprintf(stderr, "wallcull: active near=%.0f hold=%.2f recheck=%.2f lead=%.2f budget=%ld "
+            "shot=%.0f/%.0f/%.2f\n", near_dist, hold_time, recheck, lead_time, ray_budget,
+            shot_range, quiet_range, shot_hold);
 }

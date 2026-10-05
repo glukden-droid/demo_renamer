@@ -17,6 +17,7 @@ predicator that `GameLogic::findBestTargetObject` uses for target lock LOS.
 |---|---|
 | Enemy soldier on foot, farther than `WALLCULL_NEAR`, no clear line of sight | not sent |
 | Enemy soldier, line of sight clear in the last `WALLCULL_HOLD` s | sent |
+| Enemy soldier that fired in the last `WALLCULL_SHOT_HOLD` s, within `WALLCULL_SHOT_RANGE` (`WALLCULL_QUIET_RANGE` if suppressed) | sent, so the client plays the gunfire |
 | Teammates, vehicles, soldiers inside vehicles, projectiles, items | unchanged |
 | Spectators (team not 1/2), demo recording connection | unchanged |
 
@@ -51,12 +52,22 @@ The addresses then need to be found again.
 | `WALLCULL_LEAD` | 0.25 | seconds of target movement prediction |
 | `WALLCULL_RAY_BUDGET` | 40000 | rays per second; above it targets count as visible |
 | `WALLCULL_LOG` | 60 | seconds between stats lines on stderr, 0 = off |
+| `WALLCULL_SHOT_RANGE` | 150 | metres; a firing enemy is sent within this radius |
+| `WALLCULL_QUIET_RANGE` | 40 | same, for suppressed weapons (`getNoisy() == 0`) |
+| `WALLCULL_SHOT_HOLD` | 1.5 | seconds to keep sending after the last shot |
+
+Firing is read the way `Player::updateGhostFiringState` does it: weapons in
+slots 0-2 of the soldier's `IPlayerControlObject`, then `IWeaponObject::isFiring()`
+and `getNoisy()`. A shooter becomes visible to the cheat only while the gunfire
+is audible, which a player hears anyway.
 
 ## Gameplay trade-offs
 
-- Sounds of a culled enemy are not played on the client: footsteps, reloads,
-  and gunfire beyond `WALLCULL_NEAR` from enemies behind cover. PR relies on
-  sound. Raise `WALLCULL_NEAR` (e.g. 50) if this matters more than ESP at range.
+- Gunfire of hidden enemies is kept within the shot ranges above. Other
+  sounds of a culled enemy beyond `WALLCULL_NEAR` are not played: footsteps,
+  reloads, voice. Footsteps are short range, so `WALLCULL_NEAR` covers most of them.
+- Shot ranges are rough. Match them to how far PR weapons are audible; a
+  larger range is more realistic sound, a smaller one hides shooters better.
 - Bushes and smoke usually have no collision, so enemies in them stay visible.
   This errs toward sending too much, not too little.
 - When an enemy steps out, the client needs to re-create the ghost. `WALLCULL_LEAD`
@@ -75,6 +86,9 @@ Nothing here has been run against a live server yet.
    - Behind a building at 50+ m: the `culled` counter grows. An ESP overlay
      (or `debugShowActiveGhosts` on the client) no longer shows the enemy.
    - Step out from cover: the enemy appears without visible delay.
+   - Enemy behind cover at 80 m fires: the shots are heard, the `shots`
+     counter grows, the enemy disappears again ~1.5 s after the last shot.
+     With a suppressed weapon at 80 m: not sent.
 3. Full server, one round: watch the `rays` rate and `over_budget` in the log
    and the server tick time. Lower `WALLCULL_RECHECK` cost by raising it
    if CPU is tight.
