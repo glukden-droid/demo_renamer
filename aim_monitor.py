@@ -28,7 +28,7 @@ ON_TARGET_ERR = 2.0        # deg from victim's centre counted as locked
 MIN_DISTANCE = 25.0        # metres; close kills are too noisy
 FLAG_KILLS = 3             # suspicious kills per round to alert admins
 
-# BF2 yaw convention, verify on a test server (see README_aim_monitor)
+# BF2 yaw direction; flip to -1.0 if err is large on clean kills
 YAW_SIGN = 1.0
 EYE_HEIGHT = 1.6
 
