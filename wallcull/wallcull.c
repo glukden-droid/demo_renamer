@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -73,16 +74,40 @@ struct predicator {          /* layout copied from GameLogic::findBestTargetObje
 
 #define VCALL(obj, off, type) ((type)(*(void ***)(obj))[(off) / sizeof(void *)])
 
-/* --- settings (env) --- */
+/* --- settings: env at startup, then wallcull.cfg (reloaded live) --- */
 static float near_dist = 20.0f;      /* always send inside this radius (footsteps) */
 static float hold_time = 1.5f;       /* keep sending after last clear ray */
 static float recheck = 0.2f;         /* seconds between checks per pair */
 static float lead_time = 0.25f;      /* predict target movement (ping + re-ghost) */
-static long ray_budget = 40000;      /* rays per second; over budget = visible */
-static int log_interval = 60;
+static float ray_budget = 40000;     /* rays per second; over budget = visible */
+static float log_interval = 60;      /* seconds between stats lines, 0 = off */
 static float shot_range = 150.0f;    /* send a firing enemy within this radius */
 static float quiet_range = 40.0f;    /* same, for suppressed weapons */
 static float shot_hold = 1.5f;       /* keep sending after the last shot */
+
+struct setting {
+    const char *key;     /* key in wallcull.cfg */
+    const char *env;     /* environment variable */
+    float *value;
+    float min, max;
+};
+
+static const struct setting settings[] = {
+    { "near",        "WALLCULL_NEAR",        &near_dist,    0, 500 },
+    { "hold",        "WALLCULL_HOLD",        &hold_time,    0, 10 },
+    { "recheck",     "WALLCULL_RECHECK",     &recheck,      0.02f, 5 },
+    { "lead",        "WALLCULL_LEAD",        &lead_time,    0, 2 },
+    { "ray_budget",  "WALLCULL_RAY_BUDGET",  &ray_budget,   0, 1e7f },
+    { "log",         "WALLCULL_LOG",         &log_interval, 0, 86400 },
+    { "shot_range",  "WALLCULL_SHOT_RANGE",  &shot_range,   0, 5000 },
+    { "quiet_range", "WALLCULL_QUIET_RANGE", &quiet_range,  0, 5000 },
+    { "shot_hold",   "WALLCULL_SHOT_HOLD",   &shot_hold,    0, 30 },
+};
+#define NUM_SETTINGS (sizeof(settings) / sizeof(settings[0]))
+
+static const char *config_path = "wallcull.cfg";
+static time_t config_mtime;
+static double config_checked;
 
 static calc_fn orig_calc;
 static long rays_this_sec, rays_total, culled_total, checks_total, over_budget, shot_total;
@@ -246,6 +271,88 @@ static int can_see(const float *eye_mat, void *viewer_root, void *target_root,
     return 0;
 }
 
+static void print_settings(const char *what)
+{
+    fprintf(stderr, "wallcull: %s", what);
+    for (size_t i = 0; i < NUM_SETTINGS; i++)
+        fprintf(stderr, " %s=%g", settings[i].key, *settings[i].value);
+    fprintf(stderr, "\n");
+}
+
+static int set_value(const struct setting *s, const char *text, const char *source)
+{
+    char *end;
+    float v = strtof(text, &end);
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')
+        end++;
+    if (end == text || *end || v < s->min || v > s->max) {
+        fprintf(stderr, "wallcull: %s: bad %s '%s' (allowed %g..%g), kept %g\n",
+                source, s->key, text, s->min, s->max, *s->value);
+        return 0;
+    }
+    *s->value = v;
+    return 1;
+}
+
+/* Lines "key = value", '#' starts a comment. Unknown keys are reported. */
+static void load_config(void)
+{
+    FILE *f = fopen(config_path, "r");
+    if (!f)
+        return;
+    char line[256];
+    int lineno = 0;
+    while (fgets(line, sizeof(line), f)) {
+        lineno++;
+        char *hash = strchr(line, '#');
+        if (hash)
+            *hash = 0;
+        char *eq = strchr(line, '=');
+        char *k = line;
+        while (*k == ' ' || *k == '\t')
+            k++;
+        if (!*k || *k == '\n' || *k == '\r')
+            continue;
+        if (!eq) {
+            fprintf(stderr, "wallcull: %s:%d: expected key = value\n", config_path, lineno);
+            continue;
+        }
+        char *kend = eq;
+        while (kend > k && (kend[-1] == ' ' || kend[-1] == '\t'))
+            kend--;
+        *kend = 0;
+        char *v = eq + 1;
+        while (*v == ' ' || *v == '\t')
+            v++;
+        char *vend = v + strlen(v);
+        while (vend > v && (vend[-1] == ' ' || vend[-1] == '\t' || vend[-1] == '\r' || vend[-1] == '\n'))
+            vend--;
+        *vend = 0;
+        size_t i;
+        for (i = 0; i < NUM_SETTINGS; i++)
+            if (!strcmp(k, settings[i].key))
+                break;
+        if (i == NUM_SETTINGS)
+            fprintf(stderr, "wallcull: %s:%d: unknown key '%s'\n", config_path, lineno, k);
+        else
+            set_value(&settings[i], v, config_path);
+    }
+    fclose(f);
+}
+
+static void reload_config_if_changed(double now)
+{
+    if (now - config_checked < 5.0)
+        return;
+    config_checked = now;
+    struct stat st;
+    if (stat(config_path, &st) || st.st_mtime == config_mtime)
+        return;
+    config_mtime = st.st_mtime;
+    load_config();
+    print_settings("settings reloaded:");
+}
+
 static float hooked_calc(void *self, void *desc, float a, void *player,
                          float *mat, const float *vec, float b, float c, int d)
 {
@@ -254,6 +361,7 @@ static float hooked_calc(void *self, void *desc, float a, void *player,
         return prio;
 
     double now = now_sec();
+    reload_config_if_changed(now);
     if (now - sec_start >= 1.0) {
         sec_start = now;
         rays_this_sec = 0;
@@ -346,12 +454,6 @@ static int patch_jump(unsigned char *target, void *dest)
     return 0;
 }
 
-static float env_float(const char *name, float def)
-{
-    const char *v = getenv(name);
-    return v && *v ? (float)atof(v) : def;
-}
-
 __attribute__((constructor)) static void wallcull_init(void)
 {
     char exe[256] = { 0 };
@@ -362,15 +464,19 @@ __attribute__((constructor)) static void wallcull_init(void)
         return;
     }
 
-    near_dist = env_float("WALLCULL_NEAR", near_dist);
-    hold_time = env_float("WALLCULL_HOLD", hold_time);
-    recheck = env_float("WALLCULL_RECHECK", recheck);
-    lead_time = env_float("WALLCULL_LEAD", lead_time);
-    ray_budget = (long)env_float("WALLCULL_RAY_BUDGET", (float)ray_budget);
-    log_interval = (int)env_float("WALLCULL_LOG", (float)log_interval);
-    shot_range = env_float("WALLCULL_SHOT_RANGE", shot_range);
-    quiet_range = env_float("WALLCULL_QUIET_RANGE", quiet_range);
-    shot_hold = env_float("WALLCULL_SHOT_HOLD", shot_hold);
+    for (size_t i = 0; i < NUM_SETTINGS; i++) {
+        const char *v = getenv(settings[i].env);
+        if (v && *v)
+            set_value(&settings[i], v, "env");
+    }
+    const char *cfg = getenv("WALLCULL_CONFIG");
+    if (cfg && *cfg)
+        config_path = cfg;
+    struct stat st;
+    if (!stat(config_path, &st)) {
+        config_mtime = st.st_mtime;
+        load_config();
+    }
 
     unsigned char *target = (unsigned char *)ADDR_CALC_PRIORITY;
     if (memcmp(target, EXPECTED_PROLOGUE, PROLOGUE_LEN)) {
@@ -382,7 +488,6 @@ __attribute__((constructor)) static void wallcull_init(void)
         fprintf(stderr, "wallcull: patch failed, hook not installed\n");
         return;
     }
-    fprintf(stderr, "wallcull: active near=%.0f hold=%.2f recheck=%.2f lead=%.2f budget=%ld "
-            "shot=%.0f/%.0f/%.2f\n", near_dist, hold_time, recheck, lead_time, ray_budget,
-            shot_range, quiet_range, shot_hold);
+    fprintf(stderr, "wallcull: config %s\n", config_path);
+    print_settings("active");
 }

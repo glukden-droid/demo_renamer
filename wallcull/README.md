@@ -42,19 +42,28 @@ match the build it was written for
 After a PR update, stderr shows `unknown server build` and nothing is patched.
 The addresses then need to be found again.
 
-## Settings (environment)
+## Settings
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `WALLCULL_NEAR` | 20 | metres; enemies closer are always sent (footsteps) |
-| `WALLCULL_HOLD` | 1.5 | seconds to keep sending after a clear ray |
-| `WALLCULL_RECHECK` | 0.2 | seconds between checks for one viewer/target pair |
-| `WALLCULL_LEAD` | 0.25 | seconds of target movement prediction |
-| `WALLCULL_RAY_BUDGET` | 40000 | rays per second; above it targets count as visible |
-| `WALLCULL_LOG` | 60 | seconds between stats lines on stderr, 0 = off |
-| `WALLCULL_SHOT_RANGE` | 150 | metres; a firing enemy is sent within this radius |
-| `WALLCULL_QUIET_RANGE` | 40 | same, for suppressed weapons (`getNoisy() == 0`) |
-| `WALLCULL_SHOT_HOLD` | 1.5 | seconds to keep sending after the last shot |
+All distances are in metres and all times in seconds. Settings come from
+`wallcull.cfg` in the server's working directory (another path:
+`WALLCULL_CONFIG=/path/to/file`). The server re-reads the file within about 5 s
+after it changes, no restart needed. stderr then shows `settings reloaded:`
+with every value. A bad or out-of-range value is reported and the old one is
+kept. Environment variables set the values at startup, and the file overrides them.
+
+| Key in `wallcull.cfg` | Env variable | Default | Allowed | Meaning |
+|---|---|---|---|---|
+| `near` | `WALLCULL_NEAR` | 20 | 0-500 | enemies closer are always sent (footsteps) |
+| `hold` | `WALLCULL_HOLD` | 1.5 | 0-10 | keep sending after the enemy was last visible |
+| `lead` | `WALLCULL_LEAD` | 0.25 | 0-2 | predict enemy movement this far ahead |
+| `recheck` | `WALLCULL_RECHECK` | 0.2 | 0.02-5 | seconds between checks for one viewer/enemy pair |
+| `shot_range` | `WALLCULL_SHOT_RANGE` | 150 | 0-5000 | a firing enemy is sent within this distance |
+| `quiet_range` | `WALLCULL_QUIET_RANGE` | 40 | 0-5000 | same, for suppressed weapons (`getNoisy() == 0`) |
+| `shot_hold` | `WALLCULL_SHOT_HOLD` | 1.5 | 0-30 | keep sending after the last shot |
+| `ray_budget` | `WALLCULL_RAY_BUDGET` | 40000 | 0-10000000 | rays per second; above it enemies count as visible |
+| `log` | `WALLCULL_LOG` | 60 | 0-86400 | seconds between stats lines on stderr, 0 = off |
+
+`wallcull.cfg` in this folder is a commented example with the defaults.
 
 Firing is read the way `Player::updateGhostFiringState` does it: weapons in
 slots 0-2 of the soldier's `IPlayerControlObject`, then `IWeaponObject::isFiring()`
