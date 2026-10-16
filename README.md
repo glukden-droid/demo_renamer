@@ -1,3 +1,5 @@
+**Русский** · [English](README.en.md)
+
 # Demo Renamer
 
 Плагин для сервера Project Reality (BF2). Переименовывает автоматические
