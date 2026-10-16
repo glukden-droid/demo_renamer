@@ -7,12 +7,6 @@ import time
 import zlib
 
 DEMO_DIR = "mods/pr/demos/"
-PLAY_DELAY = 245.0   # demo appears ~4 minutes after Playing
-RETRY_WAIT = 10.0
-RETRIES = 12
-
-_round_started = 0.0
-_rtimer = None
 
 
 def _log(message):
@@ -48,47 +42,31 @@ def _read_info(path):
     return "%s_%s_%s_%d" % (stamp, mapname.decode('latin-1').lower(), mode.decode('latin-1'), layer)
 
 
-def _newest_demo():
-    names = [n for n in os.listdir(DEMO_DIR) if n.startswith("auto_") and n.endswith(".bf2demo")]
-    if not names:
-        return None
-    return max([os.path.join(DEMO_DIR, n) for n in names], key=os.path.getmtime)
-
-
-def _rename_step(data):
-    try:
-        started, attempt = data
-        if started != _round_started:
-            return
+def _rename_all():
+    """Rename every finished auto_*.bf2demo in DEMO_DIR."""
+    for name in os.listdir(DEMO_DIR):
+        if not name.startswith("auto_") or not name.endswith(".bf2demo"):
+            continue
+        demo = os.path.join(DEMO_DIR, name)
         try:
-            demo = _newest_demo()
             target = os.path.join(DEMO_DIR, "demo_%s.bf2demo" % _read_info(demo))
             os.rename(demo, target)
             _log("renamed to " + os.path.basename(target))
         except Exception as e:
-            if attempt + 1 < RETRIES:
-                _rtimer.fireOnce(_rename_step, RETRY_WAIT, (started, attempt + 1))
-            else:
-                _log("failed: " + str(e))
-    except Exception as e:
-        _log("error: " + str(e))
+            _log("skip %s: %s" % (name, e))
 
 
 def onGameStatusChanged(status):
-    global _round_started
+    # Demos are not being written between rounds
     try:
-        if status == bf2.GameStatus.Playing:
-            _round_started = time.time()
-            _rtimer.fireOnce(_rename_step, PLAY_DELAY, (_round_started, 0))
+        if status in (bf2.GameStatus.EndGame, bf2.GameStatus.PreGame):
+            _rename_all()
     except Exception as e:
         _log("error: " + str(e))
 
 
 def init():
-    global _rtimer
     try:
-        import game.realitytimer as rtimer
-        _rtimer = rtimer
         host.registerGameStatusHandler(onGameStatusChanged)
         _log("initialized")
     except Exception as e:
