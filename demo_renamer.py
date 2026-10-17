@@ -59,8 +59,11 @@ def _rename_all():
 def onGameStatusChanged(status):
     # Demos are not being written between rounds
     try:
-        if status in (bf2.GameStatus.EndGame, bf2.GameStatus.PreGame):
-            _rename_all()
+        # PreGame is missing on some servers, so look the names up safely
+        for name in ("EndGame", "PreGame"):
+            if hasattr(bf2.GameStatus, name) and status == getattr(bf2.GameStatus, name):
+                _rename_all()
+                return
     except Exception as e:
         _log("error: " + str(e))
 
