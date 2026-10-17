@@ -36,14 +36,15 @@ On a successful start the server log shows `DemoRenamer: initialized`.
 
 ## How it works
 
-1. When a round ends (EndGame) or the next one starts loading (PreGame), the
-   plugin scans the demo folder. No demo is being written at that moment.
+1. When a round starts (Playing), the plugin scans the demo folder. By then
+   the previous round's demo is closed and uploaded by the server, and the
+   new one only appears about 4 minutes later.
 2. For each `auto_*.bf2demo` it reads the time, map, game mode and layer from
    the file and renames it.
 3. If a file can't be read, it stays `auto_*`, the log shows `skip ...`, and
-   the plugin tries again on the next status change.
+   the plugin tries again when the next round starts.
 
-A demo gets its new name after its round ends. The time in the name is when
+A demo gets its new name when the next round starts. The time in the name is when
 the demo recording started, about 4 minutes after the round started.
 
 The demo folder is set by `DEMO_DIR` at the top of `demo_renamer.py`

@@ -17,12 +17,23 @@ def _log(message):
 
 
 def _read_info(path):
-    """Return 'YYYY_MM_DD_HH_MM_SS_map_gamemode_layer' from the demo, or None."""
+    """Return 'YYYY_MM_DD_HH_MM_SS_map_gamemode_layer' from the demo."""
+    # Read until the map block is in, up to ~4 MB of the file
+    decoder = zlib.decompressobj()
+    data = b""
     f = open(path, 'rb')
     try:
-        data = zlib.decompressobj().decompress(f.read(65536))
+        for _ in range(64):
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            data += decoder.decompress(chunk)
+            if data.find(b"\x07\x00Levels/") != -1:
+                break
     finally:
         f.close()
+    if data.find(b"\x07\x00Levels/") == -1:
+        raise ValueError("no map info yet (%d bytes)" % os.path.getsize(path))
 
     # Header: u32 id, u32 len + server name, u32 len + start time
     size = struct.unpack('<I', data[4:8])[0]
@@ -57,13 +68,11 @@ def _rename_all():
 
 
 def onGameStatusChanged(status):
-    # Demos are not being written between rounds
+    # At round start the previous demo is closed and uploaded,
+    # and the new one only appears ~4 minutes later
     try:
-        # PreGame is missing on some servers, so look the names up safely
-        for name in ("EndGame", "PreGame"):
-            if hasattr(bf2.GameStatus, name) and status == getattr(bf2.GameStatus, name):
-                _rename_all()
-                return
+        if status == bf2.GameStatus.Playing:
+            _rename_all()
     except Exception as e:
         _log("error: " + str(e))
 
