@@ -1,0 +1,52 @@
+# Сборка клиента Mumble 1.5 для Windows (установщик .msi).
+# Запуск: Actions -> Mumble client -> Run workflow.
+# Использует официальные скрипты CI самого Mumble.
+name: Mumble client
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Тег Mumble"
+        default: "v1.5.939"
+
+env:
+  BUILD_TYPE: Release
+  CMAKE_OPTIONS: -Dtests=OFF -Dserver=OFF -Dtest-lto=OFF
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: mumble-voip/mumble
+          ref: ${{ inputs.tag }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set environment variables
+        shell: bash
+        run: ./.github/workflows/set_environment_variables.sh windows-2022 static x86_64 "$GITHUB_WORKSPACE"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.MUMBLE_ENVIRONMENT_DIR }}
+          key: ${{ env.MUMBLE_ENVIRONMENT_VERSION }}
+
+      - uses: ./.github/actions/install-dependencies
+        with:
+          type: static
+          os: windows-2022
+          arch: x86_64
+
+      - name: Build
+        shell: bash
+        run: ./.github/workflows/build.sh windows-2022 static x86_64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mumble-client-${{ inputs.tag }}-win64
+          path: |
+            build/**/mumble*.msi
+            build/**/mumble*.exe
