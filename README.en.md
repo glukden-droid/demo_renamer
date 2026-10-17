@@ -18,6 +18,7 @@ and layer.
 - Automatic demo recording is enabled on the server (`sv.autoRecord 1` in
   `serversettings.con`).
 - Demos are written to `mods/pr/demos/`.
+- The `game.realitytimer` module is available (ships with PR).
 
 ## Installation
 
@@ -36,19 +37,27 @@ On a successful start the server log shows `DemoRenamer: initialized`.
 
 ## How it works
 
-1. When a round starts (Playing), the plugin scans the demo folder. By then
-   the previous round's demo is closed and uploaded by the server, and the
-   new one only appears about 4 minutes later.
-2. For each `auto_*.bf2demo` it reads the time, map, game mode and layer from
-   the file and renames it.
-3. If a file can't be read, it stays `auto_*`, the log shows `skip ...`, and
-   the plugin tries again when the next round starts.
+1. When a round ends (EndGame), the plugin starts a check every 10 seconds.
+   The server stops recording a little after EndGame.
+2. An `auto_*.bf2demo` is renamed once its size stops changing between two
+   checks, which means recording has finished.
+3. The time, map, game mode and layer are read from the file.
+4. Checks run for up to 5 minutes. If a file still can't be read, it stays
+   `auto_*`, the log shows `skip ...`, and the plugin tries again after the
+   next round.
 
-A demo gets its new name when the next round starts. The time in the name is when
-the demo recording started, about 4 minutes after the round started.
+The time in the name is when the demo recording started, about 4 minutes
+after the round started.
 
-The demo folder is set by `DEMO_DIR` at the top of `demo_renamer.py`
-(default `mods/pr/demos/`).
+## Settings
+
+At the top of `demo_renamer.py`:
+
+| Setting      | Default           | Meaning                                |
+|--------------|-------------------|----------------------------------------|
+| `DEMO_DIR`   | `mods/pr/demos/`  | demo folder                            |
+| `CHECK_WAIT` | `10.0`            | pause between checks, seconds          |
+| `CHECKS`     | `30`              | number of checks after EndGame         |
 
 ## Log
 
@@ -59,7 +68,7 @@ All messages go to the server console with the `DemoRenamer:` prefix.
 | `initialized`        | plugin loaded                                   |
 | `renamed to <name>`  | demo renamed                                    |
 | `skip <file>: ...`   | file could not be read, stays `auto_*`          |
-| `init failed: ...`   | plugin did not start                            |
+| `init failed: ...`   | plugin did not start (no `realitytimer`, etc.)  |
 | `error: ...`         | unexpected error; the server keeps running      |
 
 Plugin errors never crash the server — they are only written to the log.
