@@ -7,6 +7,12 @@ import time
 import zlib
 
 DEMO_DIR = "mods/pr/demos/"
+CHECK_WAIT = 10.0   # seconds between size checks after EndGame
+CHECKS = 30         # give up after ~5 minutes
+
+_rtimer = None
+_sizes = {}
+_round = 0
 
 
 def _log(message):
@@ -53,32 +59,55 @@ def _read_info(path):
     return "%s_%s_%s_%d" % (stamp, mapname.decode('latin-1').lower(), mode.decode('latin-1'), layer)
 
 
-def _rename_all():
-    """Rename every finished auto_*.bf2demo in DEMO_DIR."""
-    for name in os.listdir(DEMO_DIR):
-        if not name.startswith("auto_") or not name.endswith(".bf2demo"):
-            continue
-        demo = os.path.join(DEMO_DIR, name)
-        try:
-            target = os.path.join(DEMO_DIR, "demo_%s.bf2demo" % _read_info(demo))
-            os.rename(demo, target)
-            _log("renamed to " + os.path.basename(target))
-        except Exception as e:
-            _log("skip %s: %s" % (name, e))
+def _check(data):
+    """Rename auto demos whose size stopped changing (recording finished)."""
+    try:
+        round_id, attempt = data
+        if round_id != _round:
+            return
+        last = attempt + 1 >= CHECKS
+        pending = False
+        for name in os.listdir(DEMO_DIR):
+            if not name.startswith("auto_") or not name.endswith(".bf2demo"):
+                continue
+            demo = os.path.join(DEMO_DIR, name)
+            size = os.path.getsize(demo)
+            if size == 0 or _sizes.get(name) != size:
+                _sizes[name] = size
+                pending = True
+                continue
+            try:
+                target = os.path.join(DEMO_DIR, "demo_%s.bf2demo" % _read_info(demo))
+                os.rename(demo, target)
+                _log("renamed to " + os.path.basename(target))
+            except Exception as e:
+                if last:
+                    _log("skip %s: %s" % (name, e))
+                else:
+                    pending = True
+        if pending and not last:
+            _rtimer.fireOnce(_check, CHECK_WAIT, (round_id, attempt + 1))
+    except Exception as e:
+        _log("error: " + str(e))
 
 
 def onGameStatusChanged(status):
-    # At round start the previous demo is closed and uploaded,
-    # and the new one only appears ~4 minutes later
+    global _round
     try:
-        if status == bf2.GameStatus.Playing:
-            _rename_all()
+        if status == bf2.GameStatus.EndGame:
+            # Recording stops a little after EndGame; wait for the file to settle
+            _round += 1
+            _sizes.clear()
+            _rtimer.fireOnce(_check, CHECK_WAIT, (_round, 0))
     except Exception as e:
         _log("error: " + str(e))
 
 
 def init():
+    global _rtimer
     try:
+        import game.realitytimer as rtimer
+        _rtimer = rtimer
         host.registerGameStatusHandler(onGameStatusChanged)
         _log("initialized")
     except Exception as e:
